@@ -77,44 +77,36 @@
   #yt-badge span { font-size: 11px; color: var(--dim); letter-spacing: 0.5px; text-transform: uppercase; }
 
   /* Stat row */
-  #stat-row { display: flex; align-items: stretch; }
+  #stat-row {
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+  }
 
   .stat {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 14px;
-    padding-right: 36px;
-    margin-right: 36px;
+    gap: 6px;
+    padding: 0 48px;
     border-right: 1px solid var(--border);
   }
-  .stat:last-child { border-right: none; padding-right: 0; margin-right: 0; }
-
-  .stat-icon {
-    width: 40px; height: 40px;
-    background: var(--red-dim);
-    border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .stat-icon svg { width: 20px; height: 20px; fill: var(--red); }
-
-  .stat-body { display: flex; flex-direction: column; }
+  .stat:last-child { border-right: none; }
 
   .stat-value {
-    font-size: 42px;
+    font-size: 64px;
     font-weight: 800;
-    letter-spacing: -2px;
+    letter-spacing: -3px;
     line-height: 1;
     font-variant-numeric: tabular-nums;
   }
   .stat-value.accent { color: var(--red); }
 
   .stat-meta {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--dim);
     text-transform: uppercase;
-    letter-spacing: 1.2px;
-    margin-top: 4px;
+    letter-spacing: 1.5px;
   }
 
   /* ── Section label ───────────────────────────────────── */
@@ -122,7 +114,8 @@
     flex: 0 0 38px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
+    position: relative;
     padding: 0 36px;
     border-bottom: 1px solid var(--border);
   }
@@ -136,6 +129,8 @@
   }
 
   #refresh-info {
+    position: absolute;
+    right: 36px;
     font-size: 10px;
     color: var(--dim2);
   }
@@ -315,37 +310,22 @@
 
   <div id="stat-row">
     <div class="stat">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>
-      </div>
-      <div class="stat-body">
-        <div class="stat-value accent" id="stat-views">—</div>
-        <div class="stat-meta">Views · 7 days</div>
-      </div>
+      <div class="stat-value accent" id="stat-views">—</div>
+      <div class="stat-meta">Views · 30 Days</div>
     </div>
     <div class="stat">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
-      </div>
-      <div class="stat-body">
-        <div class="stat-value" id="stat-likes">—</div>
-        <div class="stat-meta">Likes · 7 days</div>
-      </div>
+      <div class="stat-value" id="stat-likes">—</div>
+      <div class="stat-meta">Likes · 30 Days</div>
     </div>
     <div class="stat">
-      <div class="stat-icon">
-        <svg viewBox="0 0 24 24"><path d="M21 6h-2v9H6v2c0 .55.45 1 1 1h11l4 4V7c0-.55-.45-1-1-1zm-4 6V3c0-.55-.45-1-1-1H3c-.55 0-1 .45-1 1v14l4-4h10c.55 0 1-.45 1-1z"/></svg>
-      </div>
-      <div class="stat-body">
-        <div class="stat-value" id="stat-comments">—</div>
-        <div class="stat-meta">Comments · 7 days</div>
-      </div>
+      <div class="stat-value" id="stat-comments">—</div>
+      <div class="stat-meta">Comments · 30 Days</div>
     </div>
   </div>
 </div>
 
 <div id="section-label">
-  <span id="section-title">Top Shorts · Last 7 Days</span>
+  <span id="section-title">Top Shorts · Last 30 Days</span>
   <span id="refresh-info">Next refresh in <span id="countdown">—</span></span>
 </div>
 
@@ -494,10 +474,14 @@ function renderPlayers(){
   if(typeof YT==="undefined"||!YT.Player) return;
   videos.forEach(v=>{
     if(players[v.video_id]) return;
+    const isActive = v.video_id === (videos[activeIdx]||{}).video_id;
     players[v.video_id]=new YT.Player(`pl-${v.video_id}`,{
       videoId:v.video_id,
-      playerVars:{autoplay:0,mute:1,controls:0,modestbranding:1,rel:0},
-      events:{onStateChange:(e)=>{ if(e.data===YT.PlayerState.ENDED) advanceActive(); }}
+      playerVars:{autoplay: isActive ? 1 : 0, mute:1,controls:0,modestbranding:1,rel:0,playsinline:1},
+      events:{
+        onReady:(e)=>{ e.target.mute(); if(isActive) e.target.playVideo(); },
+        onStateChange:(e)=>{ if(e.data===YT.PlayerState.ENDED) advanceActive(); }
+      }
     });
   });
 }

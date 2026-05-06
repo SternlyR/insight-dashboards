@@ -1,8 +1,12 @@
+"""YouTube Data API v3 client for fetching Shorts data."""
+
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
 import httpx
+
 
 @dataclass
 class ShortVideo:
@@ -16,53 +20,106 @@ class ShortVideo:
     likes: int
     comments: int
 
+
 class YouTubeAPI:
     BASE = "https://www.googleapis.com/youtube/v3"
+
     def __init__(self, api_key: str):
         self.api_key = api_key
-    async def get_channel_shorts(self, channel_id: str, max_results: int = 50):
-        ids = await self._search_shorts(channel_id, max_results)
-        if not ids: return []
-        videos = await self._fetch_details(ids)
+
+    async def get_channel_shorts(self, channel_id: str, max_results: int = 50) -> list[ShortVideo]:
+        video_ids = await self._search_shorts(channel_id, max_results)
+        if not video_ids:
+            return []
+        videos = await self._fetch_details(video_ids)
         shorts = [v for v in videos if v.duration_seconds <= 60]
         shorts.sort(key=lambda v: v.views, reverse=True)
         return shorts
-    async def _search_shorts(self, channel_id, max_results):
-        p = {"part":"id","channelId":channel_id,"type":"video","videoDuration":"short",
-             "order":"viewCount","maxResults":min(max_results,50),"key":self.api_key}
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.get(f"{self.BASE}/search", params=p); r.raise_for_status()
-        return [i["id"]["videoId"] for i in r.json().get("items",[])]
-    async def _fetch_details(self, ids):
+
+    async def _search_shorts(self, channel_id: str, max_results: int) -> list[str]:
+        published_after = (
+            datetime.now(timezone.utc) - timedelta(days=30)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        params = {
+            "part": "id",
+            "channelId": channel_id,
+            "type": "video",
+            "videoDuration": "short",
+            "order": "viewCount",
+            "publishedAfter": published_after,
+            "maxResults": min(max_results, 50),
+            "key": self.api_key,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{self.BASE}/search", params=params)
+            r.raise_for_status()
+            data = r.json()
+        return [item["id"]["videoId"] for item in data.get("items", [])]
+
+    async def _fetch_details(self, video_ids: list[str]) -> list[ShortVideo]:
         results = []
-        for i in range(0,len(ids),50):
-            chunk = ids[i:i+50]
-            p = {"part":"snippet,contentDetails,statistics","id":",".join(chunk),"key":self.api_key}
-            async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.get(f"{self.BASE}/videos", params=p); r.raise_for_status()
-            for item in r.json().get("items",[]):
-                v = self._parse(item)
-                if v: results.append(v)
+        for chunk_start in range(0, len(video_ids), 50):
+            chunk = video_ids[chunk_start:chunk_start + 50]
+            params = {
+                "part": "snippet,contentDetails,statistics",
+                "id": ",".join(chunk),
+                "key": self.api_key,
+            }
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(f"{self.BASE}/videos", params=params)
+                r.raise_for_status()
+                data = r.json()
+            for item in data.get("items", []):
+                parsed = self._parse(item)
+                if parsed:
+                    results.append(parsed)
         return results
-    def _parse(self, item):
+
+    def _parse(self, item: dict) -> Optional[ShortVideo]:
         try:
-            sn = item.get("snippet",{}); st = item.get("statistics",{})
-            dt = item.get("contentDetails",{})
-            th = (sn.get("thumbnails",{}).get("maxres") or sn.get("thumbnails",{}).get("high") or
-                  sn.get("thumbnails",{}).get("medium") or sn.get("thumbnails",{}).get("default") or {})
-            pub = None
-            if raw := sn.get("publishedAt"):
-                try: pub = datetime.fromisoformat(raw.replace("Z","+00:00"))
-                except ValueError: pass
-            return ShortVideo(video_id=item["id"], title=sn.get("title",""),
-                description=sn.get("description",""), published_at=pub,
-                thumbnail_url=th.get("url",""),
-                duration_seconds=self._iso_to_secs(dt.get("duration","PT0S")),
-                views=int(st.get("viewCount",0)), likes=int(st.get("likeCount",0)),
-                comments=int(st.get("commentCount",0)))
-        except (KeyError, ValueError): return None
+            vid_id = item["id"]
+            snippet = item.get("snippet", {})
+            stats = item.get("statistics", {})
+            details = item.get("contentDetails", {})
+
+            duration_str = details.get("duration", "PT0S")
+            duration_secs = self._iso_duration_to_seconds(duration_str)
+
+            thumbs = snippet.get("thumbnails", {})
+            thumb = (
+                thumbs.get("maxres") or thumbs.get("high") or
+                thumbs.get("medium") or thumbs.get("default") or {}
+            )
+
+            published_raw = snippet.get("publishedAt")
+            published_at = None
+            if published_raw:
+                try:
+                    published_at = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+
+            return ShortVideo(
+                video_id=vid_id,
+                title=snippet.get("title", ""),
+                description=snippet.get("description", ""),
+                published_at=published_at,
+                thumbnail_url=thumb.get("url", ""),
+                duration_seconds=duration_secs,
+                views=int(stats.get("viewCount", 0)),
+                likes=int(stats.get("likeCount", 0)),
+                comments=int(stats.get("commentCount", 0)),
+            )
+        except (KeyError, ValueError):
+            return None
+
     @staticmethod
-    def _iso_to_secs(d):
-        m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", d)
-        if not m: return 0
-        return int(m.group(1) or 0)*3600 + int(m.group(2) or 0)*60 + int(m.group(3) or 0)
+    def _iso_duration_to_seconds(duration: str) -> int:
+        match = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration)
+        if not match:
+            return 0
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or 0)
+        seconds = int(match.group(3) or 0)
+        return hours * 3600 + minutes * 60 + seconds

@@ -149,22 +149,7 @@
   .card {
     position: relative;
     overflow: hidden;
-    background: #111;
-    transition: box-shadow 0.25s ease;
-  }
-
-  .card.playing {
-    box-shadow: inset 0 0 0 2px var(--red);
-    z-index: 2;
-  }
-
-  .card.playing::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    box-shadow: inset 0 0 40px rgba(255,0,0,0.15);
-    z-index: 3;
-    pointer-events: none;
+    background: #000;
   }
 
   .card-thumb {
@@ -181,18 +166,15 @@
     width: 120%;
     height: 120%;
     pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.4s ease;
     background: #000;
     z-index: 1;
   }
-  .card.playing .card-player { opacity: 1; }
 
   .card-overlay {
     position: absolute;
     bottom: 0; left: 0; right: 0;
     padding: 28px 14px 12px;
-    background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.5) 60%, transparent 100%);
+    background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
     z-index: 2;
   }
 
@@ -227,32 +209,6 @@
     display: flex; align-items: center; justify-content: center;
     backdrop-filter: blur(4px);
   }
-
-  .card-live {
-    display: none;
-    position: absolute;
-    top: 10px; right: 10px;
-    z-index: 3;
-    align-items: center;
-    gap: 5px;
-    background: var(--red);
-    padding: 3px 9px;
-    border-radius: 4px;
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: 0.8px;
-  }
-  .card.playing .card-live {
-    display: flex;
-    animation: blink 1.8s ease-in-out infinite;
-  }
-  .card-live::before {
-    content: "";
-    width: 5px; height: 5px;
-    border-radius: 50%;
-    background: #fff;
-  }
-  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
   /* ── Chart section ───────────────────────────────────── */
   #chart-section {
@@ -346,7 +302,7 @@
 const REFRESH_MS  = 15 * 60 * 1000;
 const COUNTUP_MS  = 2800;
 
-let videos = [], activeIdx = 0, players = {};
+let videos = [], players = {};
 let chart = null, refreshTimer = null, nextRefreshAt = null;
 
 // ── YouTube IFrame API ────────────────────────────────────────────────────────
@@ -418,7 +374,6 @@ const LIKE = `<svg viewBox="0 0 24 24"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2
 function buildGrid(vids){
   const g=document.getElementById("grid");
 
-  // Remove stale cards
   const newIds=new Set(vids.map(v=>v.video_id));
   [...g.querySelectorAll(".card")].forEach(c=>{
     if(!newIds.has(c.dataset.vid)){ players[c.dataset.vid]?.destroy(); delete players[c.dataset.vid]; c.remove(); }
@@ -432,9 +387,7 @@ function buildGrid(vids){
       card.dataset.vid=v.video_id;
 
       const thumb=document.createElement("img");
-      thumb.className="card-thumb";
-      thumb.src=v.thumbnail_url;
-      thumb.alt="";
+      thumb.className="card-thumb"; thumb.src=v.thumbnail_url; thumb.alt="";
 
       const playerDiv=document.createElement("div");
       playerDiv.className="card-player";
@@ -442,60 +395,41 @@ function buildGrid(vids){
 
       const overlay=document.createElement("div");
       overlay.className="card-overlay";
-
       const stats=document.createElement("div");
       stats.className="card-stats";
       stats.innerHTML=`<span class="cs">${EYE}${fmt(v.views)}</span><span class="cs">${LIKE}${fmt(v.likes)}</span>`;
       overlay.appendChild(stats);
 
       const rank=document.createElement("div");
-      rank.className="card-rank";
-      rank.textContent=i+1;
+      rank.className="card-rank"; rank.textContent=i+1;
 
-      const live=document.createElement("div");
-      live.className="card-live";
-      live.textContent="LIVE";
-
-      card.append(thumb,playerDiv,overlay,rank,live);
+      card.append(thumb,playerDiv,overlay,rank);
       g.appendChild(card);
     } else {
-      // Refresh stats only
       const stats=card.querySelector(".card-stats");
       if(stats) stats.innerHTML=`<span class="cs">${EYE}${fmt(v.views)}</span><span class="cs">${LIKE}${fmt(v.likes)}</span>`;
     }
   });
 
   renderPlayers();
-  if(typeof YT!=="undefined"&&YT.Player) setActive(activeIdx);
 }
 
 function renderPlayers(){
   if(typeof YT==="undefined"||!YT.Player) return;
   videos.forEach(v=>{
     if(players[v.video_id]) return;
-    const isActive = v.video_id === (videos[activeIdx]||{}).video_id;
     players[v.video_id]=new YT.Player(`pl-${v.video_id}`,{
       videoId:v.video_id,
-      playerVars:{autoplay: isActive ? 1 : 0, mute:1,controls:0,modestbranding:1,rel:0,playsinline:1},
+      playerVars:{autoplay:1,mute:1,controls:0,modestbranding:1,rel:0,playsinline:1,loop:1,playlist:v.video_id},
       events:{
-        onReady:(e)=>{ e.target.mute(); if(isActive) e.target.playVideo(); },
-        onStateChange:(e)=>{ if(e.data===YT.PlayerState.ENDED) advanceActive(); }
+        onReady:(e)=>{ e.target.mute(); e.target.playVideo(); },
+        onStateChange:(e)=>{
+          if(e.data===YT.PlayerState.ENDED){
+            try{ e.target.seekTo(0); e.target.playVideo(); }catch(_){}
+          }
+        }
       }
     });
-  });
-}
-
-function advanceActive(){ setActive(activeIdx+1); }
-
-function setActive(idx){
-  if(!videos.length) return;
-  activeIdx=((idx%videos.length)+videos.length)%videos.length;
-  const vid=videos[activeIdx];
-  document.querySelectorAll(".card").forEach(c=>c.classList.remove("playing"));
-  document.querySelector(`[data-vid="${vid.video_id}"]`)?.classList.add("playing");
-  Object.entries(players).forEach(([id,p])=>{
-    if(id===vid.video_id){ try{p.loadVideoById({videoId:id,startSeconds:0});p.mute();}catch(_){} }
-    else { try{p.stopVideo();}catch(_){} }
   });
 }
 

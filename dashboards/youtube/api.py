@@ -32,7 +32,7 @@ class YouTubeAPI:
         if not video_ids:
             return []
         videos = await self._fetch_details(video_ids)
-        shorts = [v for v in videos if v.duration_seconds <= 60]
+        shorts = [v for v in videos if v.duration_seconds <= 180]
         shorts.sort(key=lambda v: v.views, reverse=True)
         return shorts
 

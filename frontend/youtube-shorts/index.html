@@ -151,20 +151,6 @@
     overflow: hidden;
     background: #111;
     transition: box-shadow 0.25s ease;
-    cursor: pointer;
-  }
-
-  .card::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: rgba(255,255,255,0);
-    transition: background 0.2s ease;
-    z-index: 4;
-    pointer-events: none;
-  }
-  .card:not(.playing):hover::after {
-    background: rgba(255,255,255,0.07);
   }
 
   .card.playing {
@@ -471,7 +457,6 @@ function buildGrid(vids){
       live.textContent="LIVE";
 
       card.append(thumb,playerDiv,overlay,rank,live);
-      card.addEventListener("click",()=>setActive(i));
       g.appendChild(card);
     } else {
       // Refresh stats only
@@ -491,18 +476,16 @@ function renderPlayers(){
     const isActive = v.video_id === (videos[activeIdx]||{}).video_id;
     players[v.video_id]=new YT.Player(`pl-${v.video_id}`,{
       videoId:v.video_id,
-      playerVars:{autoplay: isActive ? 1 : 0, mute:1,controls:0,modestbranding:1,rel:0,playsinline:1,loop:1,playlist:v.video_id},
+      playerVars:{autoplay: isActive ? 1 : 0, mute:1,controls:0,modestbranding:1,rel:0,playsinline:1},
       events:{
         onReady:(e)=>{ e.target.mute(); if(isActive) e.target.playVideo(); },
-        onStateChange:(e)=>{
-          if(e.data===YT.PlayerState.ENDED){
-            try{ e.target.seekTo(0); e.target.playVideo(); }catch(_){}
-          }
-        }
+        onStateChange:(e)=>{ if(e.data===YT.PlayerState.ENDED) advanceActive(); }
       }
     });
   });
 }
+
+function advanceActive(){ setActive(activeIdx+1); }
 
 function setActive(idx){
   if(!videos.length) return;

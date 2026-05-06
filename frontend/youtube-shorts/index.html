@@ -151,6 +151,20 @@
     overflow: hidden;
     background: #111;
     transition: box-shadow 0.25s ease;
+    cursor: pointer;
+  }
+
+  .card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: rgba(255,255,255,0);
+    transition: background 0.2s ease;
+    z-index: 4;
+    pointer-events: none;
+  }
+  .card:not(.playing):hover::after {
+    background: rgba(255,255,255,0.07);
   }
 
   .card.playing {
@@ -344,10 +358,9 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
 <script>
 const REFRESH_MS  = 15 * 60 * 1000;
-const HOLD_SECS   = 20;
 const COUNTUP_MS  = 2800;
 
-let videos = [], activeIdx = 0, players = {}, holdTimer = null;
+let videos = [], activeIdx = 0, players = {};
 let chart = null, refreshTimer = null, nextRefreshAt = null;
 
 // ── YouTube IFrame API ────────────────────────────────────────────────────────
@@ -458,6 +471,7 @@ function buildGrid(vids){
       live.textContent="LIVE";
 
       card.append(thumb,playerDiv,overlay,rank,live);
+      card.addEventListener("click",()=>setActive(i));
       g.appendChild(card);
     } else {
       // Refresh stats only
@@ -477,10 +491,14 @@ function renderPlayers(){
     const isActive = v.video_id === (videos[activeIdx]||{}).video_id;
     players[v.video_id]=new YT.Player(`pl-${v.video_id}`,{
       videoId:v.video_id,
-      playerVars:{autoplay: isActive ? 1 : 0, mute:1,controls:0,modestbranding:1,rel:0,playsinline:1},
+      playerVars:{autoplay: isActive ? 1 : 0, mute:1,controls:0,modestbranding:1,rel:0,playsinline:1,loop:1,playlist:v.video_id},
       events:{
         onReady:(e)=>{ e.target.mute(); if(isActive) e.target.playVideo(); },
-        onStateChange:(e)=>{ if(e.data===YT.PlayerState.ENDED) advanceActive(); }
+        onStateChange:(e)=>{
+          if(e.data===YT.PlayerState.ENDED){
+            try{ e.target.seekTo(0); e.target.playVideo(); }catch(_){}
+          }
+        }
       }
     });
   });
@@ -496,10 +514,7 @@ function setActive(idx){
     if(id===vid.video_id){ try{p.loadVideoById({videoId:id,startSeconds:0});p.mute();}catch(_){} }
     else { try{p.stopVideo();}catch(_){} }
   });
-  clearTimeout(holdTimer);
-  holdTimer=setTimeout(advanceActive,HOLD_SECS*1000);
 }
-function advanceActive(){ setActive(activeIdx+1); }
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
 function buildChart(data){

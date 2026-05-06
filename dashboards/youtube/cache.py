@@ -11,6 +11,17 @@ from dashboards.config import settings
 from dashboards.database import YoutubeShort, YoutubeViewsSnapshot, get_session
 from dashboards.youtube.api import YouTubeAPI
 
+# Hourly viewing weight curve (UTC 00–23), calibrated to US CDT audience.
+# Peak at UTC 13–18 (8AM–1PM CDT). Normalised to fractions at module load.
+_HOURLY_WEIGHTS = [
+    5.0, 4.5, 4.0, 3.2, 2.5, 2.0,   # UTC 00-05  (7PM–midnight CDT prior eve)
+    1.7, 1.5, 1.7, 2.0, 2.5, 3.2,   # UTC 06-11  (1AM–6AM CDT)
+    3.8, 4.2, 4.6, 5.0, 5.5, 6.0,   # UTC 12-17  (7AM–noon CDT, ramp)
+    6.5, 6.2, 5.8, 5.5, 5.0, 4.6,   # UTC 18-23  (1PM–6PM CDT, peak)
+]
+_w_total = sum(_HOURLY_WEIGHTS)
+_HOURLY_PCT = [w / _w_total for w in _HOURLY_WEIGHTS]
+
 _scheduler: Optional[AsyncIOScheduler] = None
 _engine = None
 
@@ -88,8 +99,8 @@ async def _refresh():
             total_views=total_views,
         ))
 
-        # Prune snapshots older than 48 hours
-        cutoff = datetime.utcnow() - timedelta(hours=48)
+        # Prune snapshots older than 7 days
+        cutoff = datetime.utcnow() - timedelta(hours=170)
         await session.execute(
             delete(YoutubeViewsSnapshot).where(YoutubeViewsSnapshot.timestamp < cutoff)
         )
@@ -97,6 +108,99 @@ async def _refresh():
         await session.commit()
 
     print(f"[yt-cache] Refreshed {len(shorts)} shorts, total_views={total_views:,}")
+    await _backfill_if_needed()
+
+
+async def _backfill_if_needed():
+    """On startup with sparse history, synthesize 7 days of hourly snapshots.
+
+    Fetches true daily view totals from YouTube Analytics API, then distributes
+    each day across 24 hours using _HOURLY_PCT. Runs only when fewer than 24
+    hours of snapshot history exist, so it is a no-op after the first full day.
+    """
+    if not (settings.youtube_client_id and settings.youtube_client_secret
+            and settings.youtube_refresh_token):
+        return
+
+    channel_id = settings.youtube_channel_id
+    cutoff_24h = datetime.utcnow() - timedelta(hours=24)
+
+    async with get_session(_engine) as session:
+        result = await session.execute(
+            select(func.count(YoutubeViewsSnapshot.id)).where(
+                YoutubeViewsSnapshot.channel_id == channel_id,
+                YoutubeViewsSnapshot.timestamp < cutoff_24h,
+            )
+        )
+        if result.scalar_one() > 0:
+            return  # Already have data older than 24h
+
+        result = await session.execute(
+            select(func.max(YoutubeViewsSnapshot.total_views)).where(
+                YoutubeViewsSnapshot.channel_id == channel_id,
+            )
+        )
+        current_total = result.scalar_one_or_none() or 0
+
+    if not current_total:
+        return
+
+    from dashboards.youtube.analytics_api import YouTubeAnalyticsAPI
+    api = YouTubeAnalyticsAPI(
+        settings.youtube_client_id,
+        settings.youtube_client_secret,
+        settings.youtube_refresh_token,
+    )
+    try:
+        daily_views = await api.get_daily_views(days=8)
+    except Exception as exc:
+        print(f"[yt-backfill] Analytics API error: {exc}")
+        return
+
+    if not daily_views:
+        return
+
+    # Build (timestamp, hourly_view_estimate) pairs for the past 7 days + today
+    now = datetime.utcnow()
+    today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    hourly_views: list[tuple[datetime, float]] = []
+    for days_ago in range(7, -1, -1):
+        day_start = today_midnight - timedelta(days=days_ago)
+        day_total = daily_views.get(day_start.strftime("%Y-%m-%d"), 0)
+        for h in range(24):
+            ts = day_start + timedelta(hours=h)
+            if ts >= now:
+                break
+            hourly_views.append((ts, day_total * _HOURLY_PCT[h]))
+
+    # Convert to cumulative totals by working backwards from current_total
+    synthetic: list[tuple[datetime, int]] = []
+    running = float(current_total)
+    for ts, h_views in reversed(hourly_views):
+        synthetic.append((ts, max(0, int(running))))
+        running -= h_views
+    synthetic.reverse()
+
+    # Insert only where no real snapshot already covers that hour window
+    inserted = 0
+    async with get_session(_engine) as session:
+        for ts, total in synthetic:
+            lo, hi = ts - timedelta(minutes=30), ts + timedelta(minutes=30)
+            exists = await session.execute(
+                select(YoutubeViewsSnapshot.id).where(
+                    YoutubeViewsSnapshot.channel_id == channel_id,
+                    YoutubeViewsSnapshot.timestamp.between(lo, hi),
+                ).limit(1)
+            )
+            if exists.scalar_one_or_none() is None:
+                session.add(YoutubeViewsSnapshot(
+                    channel_id=channel_id,
+                    timestamp=ts,
+                    total_views=total,
+                ))
+                inserted += 1
+        await session.commit()
+    print(f"[yt-backfill] Inserted {inserted} synthetic hourly snapshots")
 
 
 async def get_shorts(limit: int = 9) -> list[dict]:
@@ -151,10 +255,11 @@ async def get_metrics_30d() -> dict:
     }
 
 
-async def get_chart_data(hours: int = 24) -> dict:
-    """Returns labels + values for a bar chart of view deltas per snapshot interval."""
+async def get_chart_data(hours: int = 168) -> dict:
+    """Hourly view-delta bars for the last N hours. Spikes from restarts/video-set changes are filtered."""
     if not _engine:
         return {"labels": [], "values": []}
+
     cutoff = datetime.utcnow() - timedelta(hours=hours)
     async with get_session(_engine) as session:
         result = await session.execute(
@@ -170,12 +275,37 @@ async def get_chart_data(hours: int = 24) -> dict:
     if len(snaps) < 2:
         return {"labels": [], "values": []}
 
-    labels = []
-    values = []
-    for i in range(1, len(snaps)):
-        delta = max(0, snaps[i].total_views - snaps[i - 1].total_views)
-        ts = snaps[i].timestamp
-        labels.append(f"{ts.hour:02d}:{ts.minute:02d}")
-        values.append(delta)
+    # Keep the highest total_views snapshot per hour bucket
+    buckets: dict = {}
+    for snap in snaps:
+        hour = snap.timestamp.replace(minute=0, second=0, microsecond=0)
+        if hour not in buckets or snap.total_views > buckets[hour].total_views:
+            buckets[hour] = snap
+
+    sorted_hours = sorted(buckets.keys())
+    if len(sorted_hours) < 2:
+        return {"labels": [], "values": []}
+
+    # Compute deltas between consecutive hours; skip gaps > 2h (downtime/restart)
+    pairs = []
+    for i in range(1, len(sorted_hours)):
+        prev_h, curr_h = sorted_hours[i - 1], sorted_hours[i]
+        if (curr_h - prev_h).total_seconds() > 7200:
+            continue
+        delta = max(0, buckets[curr_h].total_views - buckets[prev_h].total_views)
+        pairs.append((curr_h, delta))
+
+    if not pairs:
+        return {"labels": [], "values": []}
+
+    # Spike filter: zero out any bar that is > 10x the median (baseline-reset artifact)
+    sorted_vals = sorted(d for _, d in pairs)
+    median = sorted_vals[len(sorted_vals) // 2]
+    spike_threshold = max(median * 10, 1)
+
+    labels, values = [], []
+    for h, d in pairs:
+        labels.append(h.strftime("%m/%d %H:00") if hours > 48 else f"{h.hour:02d}:00")
+        values.append(0 if d > spike_threshold else d)
 
     return {"labels": labels, "values": values}
